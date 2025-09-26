@@ -1,10 +1,12 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -41,11 +43,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 	defer file.Close()
 	mediaType := header.Header.Get("Content-Type")
-	byteData, err := io.ReadAll(file)
-	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Unable to read file data", err)
-		return
-	}
+	mediaType = strings.Split(mediaType, "/")[1]
 	vidMeta, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Unable to get video from DB", err)
@@ -55,12 +53,23 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusUnauthorized, "You are not the owner of this video", err)
 		return
 	}
-	encodedData := base64.StdEncoding.EncodeToString(byteData)
-	newVidURL := fmt.Sprintf("data:%v;base64,%v", mediaType, encodedData)
+	filePath := filepath.Join(cfg.assetsRoot, videoIDString+"."+mediaType)
+	fmt.Println(filePath)
+	newFile, err := os.Create(filePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to create file", err)
+		return
+	}
+	_, err3 := io.Copy(newFile, file)
+	if err3 != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to copy file data", err3)
+		return
+	}
+	newVidURL := fmt.Sprintf("http://localhost:%v/assets/%v.%v", cfg.port, videoID, mediaType)
 	vidMeta.ThumbnailURL = &newVidURL
-	err2 := cfg.db.UpdateVideo(vidMeta)
-	if err2 != nil {
-		respondWithError(w, http.StatusInternalServerError, "Unable to update video in DB", err2)
+	err4 := cfg.db.UpdateVideo(vidMeta)
+	if err4 != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to update video in DB", err4)
 		return
 	}
 	respondWithJSON(w, http.StatusOK, vidMeta)
