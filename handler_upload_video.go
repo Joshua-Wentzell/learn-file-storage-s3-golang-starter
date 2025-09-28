@@ -1,20 +1,53 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
 )
+
+func getVideoAspectRatio(filePath string) (string, error) {
+	type Stream struct {
+		Width  int `json:"width"`
+		Height int `json:"height"`
+	}
+	type FFProbeResult struct {
+		Streams []Stream `json:"streams"`
+	}
+	com := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
+	comResult := &bytes.Buffer{}
+	com.Stdout = comResult
+	if err := com.Run(); err != nil {
+		return "", err
+	}
+	var jsonResult FFProbeResult
+	if err := json.Unmarshal(comResult.Bytes(), &jsonResult); err != nil {
+		return "", err
+	}
+	width := float64(jsonResult.Streams[0].Width)
+	height := float64(jsonResult.Streams[0].Height)
+	aspectRatio := width / height
+	aspectRatioStr := "other"
+	if aspectRatio >= 0.5 && aspectRatio <= 0.6 {
+		aspectRatioStr = "9:16"
+	} else if aspectRatio >= 1.7 && aspectRatio <= 1.8 {
+		aspectRatioStr = "16:9"
+	}
+	return aspectRatioStr, nil
+}
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
 	const maxMemory = 1 << 30
@@ -63,19 +96,30 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "Unable to create temp file", err)
 		return
 	}
-	defer os.Remove("tubely-upload.mp4")
+	defer os.Remove(tempFile.Name())
 	defer tempFile.Close()
 	if _, err := io.Copy(tempFile, formFile); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to copy video data to temp file", err)
 		return
 	}
+	aspect, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error getting video aspect ratio", err)
+		return
+	}
+	aspectMap := map[string]string{
+		"16:9":  "landscape",
+		"9:16":  "portrait",
+		"other": "other",
+	}
+	aspectString := aspectMap[aspect]
 	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to move file pointer back to start", err)
 		return
 	}
 	byteSlice := make([]byte, 32)
 	rand.Read(byteSlice)
-	randFileName := base64.RawURLEncoding.EncodeToString(byteSlice) + "." + fileExt
+	randFileName := aspectString + "/" + base64.RawURLEncoding.EncodeToString(byteSlice) + "." + fileExt
 	putObjectInput := &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
 		Key:         &randFileName,
