@@ -49,6 +49,18 @@ func getVideoAspectRatio(filePath string) (string, error) {
 	return aspectRatioStr, nil
 }
 
+func processVideoForFastStart(filePath string) (string, error) {
+	outputPath := filePath + ".processing"
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", "-movflags", "faststart", "-f", "mp4", outputPath)
+	var cmdResult, stdErr bytes.Buffer
+	cmd.Stdout = &cmdResult
+	cmd.Stderr = &stdErr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("ffmeg failed with error:%v and stderr%v", err, stdErr.String())
+	}
+	return outputPath, nil
+}
+
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
 	const maxMemory = 1 << 30
 	r.Body = http.MaxBytesReader(w, r.Body, maxMemory)
@@ -120,10 +132,22 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	byteSlice := make([]byte, 32)
 	rand.Read(byteSlice)
 	randFileName := aspectString + "/" + base64.RawURLEncoding.EncodeToString(byteSlice) + "." + fileExt
+	optimizedTemp, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "File optimization failed", err)
+		return
+	}
+	optimizedFile, err := os.Open(optimizedTemp)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to open optimized temp file", err)
+		return
+	}
+	defer os.Remove(optimizedTemp)
+	defer optimizedFile.Close()
 	putObjectInput := &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
 		Key:         &randFileName,
-		Body:        tempFile,
+		Body:        optimizedFile,
 		ContentType: &mediaType,
 	}
 	cfg.s3Client.PutObject(context.TODO(), putObjectInput)
