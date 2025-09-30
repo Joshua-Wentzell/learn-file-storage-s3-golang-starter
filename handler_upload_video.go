@@ -13,9 +13,11 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
+	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 	"github.com/google/uuid"
 )
 
@@ -59,6 +61,19 @@ func processVideoForFastStart(filePath string) (string, error) {
 		return "", fmt.Errorf("ffmeg failed with error:%v and stderr%v", err, stdErr.String())
 	}
 	return outputPath, nil
+}
+
+func generatePresignedURL(s3Client *s3.Client, bucket, key string, expireTime time.Duration) (string, error) {
+	presignC := s3.NewPresignClient(s3Client)
+	getObjectInput := &s3.GetObjectInput{
+		Bucket: &bucket,
+		Key:    &key,
+	}
+	urlc, err := presignC.PresignGetObject(context.TODO(), getObjectInput, s3.WithPresignExpires(expireTime))
+	if err != nil {
+		return "", err
+	}
+	return urlc.URL, nil
 }
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
@@ -151,10 +166,27 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		ContentType: &mediaType,
 	}
 	cfg.s3Client.PutObject(context.TODO(), putObjectInput)
-	newVidURL := fmt.Sprintf("https://%v.s3.%v.amazonaws.com/%v", cfg.s3Bucket, cfg.s3Region, randFileName)
+	newVidURL := fmt.Sprintf("%v,%v", cfg.s3Bucket, randFileName)
 	vidMeta.VideoURL = &newVidURL
 	if err := cfg.db.UpdateVideo(vidMeta); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to update video in DB", err)
 		return
 	}
+}
+
+func (cfg *apiConfig) dbVideoToSignedVideo(video database.Video) (database.Video, error) {
+	vals := strings.Split(*video.VideoURL, ",")
+	var bucket, key string
+	if len(vals) == 2 {
+		bucket = vals[0]
+		key = vals[1]
+	} else {
+		return video, nil
+	}
+	url, err := generatePresignedURL(cfg.s3Client, bucket, key, (60 * time.Minute))
+	if err != nil {
+		return database.Video{}, err
+	}
+	video.VideoURL = &url
+	return video, nil
 }
